@@ -17,7 +17,7 @@ import pandas
 import pickle
 import sqlite3
 import datetime
-import MySQLdb
+#import MySQLdb
 from operator import itemgetter
 from dateutil.relativedelta import relativedelta
 
@@ -163,211 +163,8 @@ class _SQLite(DriverInterface):
         return symbol_dict
 
 
-class _MySQL(DriverInterface):
-    """
-    Driver class for SQLite
-    """
 
-    def __init__(self):
-        self._connect()
-    
-    def __del__(self):
-        self.db.close()
-            
-    def _connect(self):
-        s_filepath = os.path.dirname(os.path.abspath(__file__))
-        # Read password from a file (does not support whitespace)
-        s_pass = open(os.path.join(s_filepath,'pass.txt')).read().rstrip()
-        
-
-        self.db = MySQLdb.connect("localhost", "finance", s_pass, "premiumdata")
-
-        self.cursor = self.db.cursor()
-
-    def get_data(self, ts_list, symbol_list, data_item,
-                    verbose=False, include_delisted=False):
-        if _ScratchCache.try_cache:
-            return _ScratchCache.try_cache(ts_list, symbol_list, data_item,
-                        verbose, include_delisted, self.get_data_hard_read, "MySQL")
-        else:
-            return self.get_data_hard_read(ts_list, symbol_list, data_item,
-                        verbose, include_delisted)
-
-    def get_data_hard_read(self, ts_list, symbol_list, data_item, verbose=False, include_delisted=False):
-        """
-        Read data into a DataFrame from SQLite
-        @param ts_list: List of timestamps for which the data values are needed. Timestamps must be sorted.
-        @param symbol_list: The list of symbols for which the data values are needed
-        @param data_item: The data_item needed. Like open, close, volume etc.  May be a list, in which case a list of DataFrame is returned.
-        @param include_delisted: If true, delisted securities will be included.
-        @note: If a symbol is not found all the values in the column for that stock will be NaN. Execution then
-        continues as usual. No errors are raised at the moment.
-        """
-        columns = []
-        results = []
-
-        # Check input data
-        assert isinstance(ts_list, list)
-        assert isinstance(symbol_list, list)
-        assert isinstance(data_item, list)
-
-        # Map to new database schema to preserve legacy code
-        ds_map = {'open':'tropen',
-                  'high':'trhigh',
-                  'low':'trlow',
-                  'close':'trclose',
-                  'actual_close':'close',
-                  'volume':'volume',
-                  'adjusted_close':'adjclose'}
-
-        data_item = map(lambda(x): ds_map[x], data_item)
-
-
-        # Combine Symbols List for Query
-        symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
-
-        # Combine Data Fields for Query
-        data_item = map(lambda x: "B." + x, data_item)
-        query_select_items = ",".join(data_item)
-
-        self.cursor.execute("""
-        select A.code as symbol, B.date,""" + query_select_items + """
-        from priceadj B, asset A where A.assetid = B.assetid and 
-        B.date >= %s and B.date <= %s and A.code in (
-        """ + symbol_query_list + """)""", (ts_list[0].replace(hour=0),
-                                             ts_list[-1],))
-
-        # Retrieve Results
-        results = self.cursor.fetchall()
-        
-        # Create Data frames
-        for i in range(len(data_item)):
-            columns.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
-
-        # Loop through rows
-        for row in results:
-            #format of row is (sym, date, item1, item2, ...)
-            dt_date = row[1] + relativedelta(hours=16)
-            if dt_date not in columns[i].index:
-                continue
-            # Add all columns to respective data-frames
-            for i in range(len(data_item)):
-                columns[i][row[0]][dt_date] = row[i + 2]
-        
-        return columns
-  
-
-    def get_dividends(self, ts_list, symbol_list):
-        """
-        Read dividend data into a DataFrame from SQLite
-        @param ts_list: List of timestamps for which the data values are needed. Timestamps must be sorted.
-        @param symbol_list: The list of symbols for which the data values are needed
-        """
-
-        # Combine Symbols List for Query
-        symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
-
-        self.cursor.execute("""
-        select code, exdate, divamt
-        from dividend B, asset A where A.assetid = B.assetid and 
-        B.exdate >= %s and B.exdate <= %s and A.code in (
-        """ + symbol_query_list + """)""", (ts_list[0].replace(hour=0),
-                                             ts_list[-1],))
-        
-        # Retrieve Results
-        results = self.cursor.fetchall()
-
-        # Remove all rows that were not asked for
-        results = list(results)
-
-        if len(results) == 0:
-            return pandas.DataFrame(columns=symbol_list)
-  
-        # Create Pandas DataFrame in Expected Format
-        current_dict = {}
-        symbol_ranges = self._find_ranges_of_symbols(results)
-        for symbol, ranges in symbol_ranges.items():
-            current_symbol_data = results[ranges[0]:ranges[1] + 1]
-        
-            current_dict[symbol] = pandas.Series(map(itemgetter(2), 
-                                                current_symbol_data),
-                 index=map(lambda x: itemgetter(1)(x) + relativedelta(hours=16), 
-                                              current_symbol_data))
-
-                    
-        # Make DataFrame
-        ret = pandas.DataFrame(current_dict, columns=symbol_list)
-        return ret.reindex(ts_list)
-
-
-    def get_list(self, list_name):
-        
-        if type(list_name) == type('str') or \
-           type(list_name) == type(u'unicode'):
-            self.cursor.execute("""select symbol from premiumdata.lists
-                                   where name=%s;""", (list_name))
-        else:
-            self.cursor.execute("""select myself.code as symbol from 
-                indexconstituent consititue1_, asset myself
-                where myself.assetid = consititue1_.assetid and 
-                consititue1_.indexassetid = %s;""", (str(int(list_name))))
-
-        return sorted([x[0] for x in self.cursor.fetchall()])
-
-    def get_all_symbols(self):
-        ''' Returns all symbols '''
-        self.cursor.execute('''select distinct code from asset a where  
-                               a.statuscodeid<100 and a.recordstatus=1''')
-        return sorted([x[0] for x in self.cursor.fetchall()])
-
-    def get_all_lists(self):
-        
-
-        self.cursor.execute("""select asset0_.assetid as id, asset0_.issuername as name
-            from asset asset0_ where exists 
-            (select consititue1_.assetid from indexconstituent consititue1_ 
-            where asset0_.assetid=consititue1_.indexassetid) 
-            order by asset0_.issuername;""")
-        return sorted([x[1] for x in self.cursor.fetchall()])
-
-    def get_last_date(self):
-        ''' Returns last day of valid data '''
-        self.cursor.execute( ''' select ts from premiumdata.price 
-                p,premiumdata.asset a, (select assetid as id,max(date)
-                as ts from premiumdata.price group by assetid) s
-                where p.assetid = a.assetid and s.id = p.assetid and 
-                p.date = s.ts and a.code='SPY';''')
-        dt_ret = datetime.datetime.combine(self.cursor.fetchall()[0][0],
-                                           datetime.time(16))
-        return dt_ret
-    
-    def get_shares(self, symbol_list):
-        ''' Returns list of values corresponding to shares outstanding '''
-        
-        symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
-        self.cursor.execute( ''' SELECT code, sharesoutstanding FROM asset a
-                                 where code in (''' + symbol_query_list + ');' )
-
-        return dict(self.cursor.fetchall())
-        
-         
-    def _find_ranges_of_symbols(self, results):
-        ''' Finds range of current symbols in results list '''
-        symbol_dict = {}
-        current_symbol = results[0][0]
-        start = 0
-
-        for i, row in enumerate(results):
-            if row[0] != current_symbol:
-                symbol_dict[current_symbol] = (start, i - 1)
-                start = i
-                current_symbol = row[0]
-        
-        #handle last symbol
-        symbol_dict[current_symbol] = (start, i)
-
-        return symbol_dict
-
+# remove mysqldb 
 
 class _ScratchCache(object):
     @staticmethod
@@ -475,7 +272,8 @@ class DataAccess(object):
     """
     Factory class that returns the requested data source driver
     """
-    drivers = {'sqlite': _SQLite, 'mysql': _MySQL}
+    #drivers = {'sqlite': _SQLite, 'mysql': _MySQL}
+    drivers = {'sqlite': _SQLite}
 
     def __new__(self, driver):
         if not DataAccess.drivers[driver]:
@@ -485,8 +283,8 @@ class DataAccess(object):
 
 
 if __name__ == "__main__":
-    db = DataAccess('mysql')
-
+    #db = DataAccess('mysql')
+    db = DataAccess('sqlite')
     date1 = datetime.datetime(2012, 2, 27, 16)
     date2 = datetime.datetime(2012, 2, 29, 16)
     date3 = datetime.datetime(2012, 9, 29, 16)
