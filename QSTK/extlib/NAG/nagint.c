@@ -9,7 +9,7 @@
  */
 
 /* Should be before any other includes */
-#include <python2.7/Python.h>
+#include <python2.6/Python.h>
 
 #include <stdio.h>
 
